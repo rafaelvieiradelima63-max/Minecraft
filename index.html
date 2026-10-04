@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Minecraft Retrô JS</title>
+  <style>
+    * { box-sizing: border-box; touch-action: none; margin: 0; padding: 0; user-select: none; }
+    body { overflow: hidden; background-color: #87ceeb; font-family: monospace; }
+    #canvas-container { width: 100vw; height: 100vh; display: block; }
+    
+    /* Crosshair */
+    #crosshair {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      color: white; font-size: 24px; font-weight: bold; pointer-events: none;
+      text-shadow: 1px 1px 2px black;
+    }
+
+    /* Hotbar / Toolbar */
+    #hotbar {
+      position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px; background: rgba(0, 0, 0, 0.5); padding: 6px;
+      border-radius: 8px; border: 2px solid #555;
+    }
+    .slot {
+      width: 44px; height: 44px; border: 2px solid #aaa; background: #333;
+      display: flex; align-items: center; justify-content: center; color: white;
+      font-size: 12px; cursor: pointer; border-radius: 4px;
+    }
+    .slot.active { border-color: #fff; background: #666; transform: scale(1.08); }
+
+    /* Touch Controls */
+    .touch-btn {
+      position: absolute; background: rgba(255, 255, 255, 0.25);
+      border: 2px solid rgba(255, 255, 255, 0.5); border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: bold; font-size: 18px;
+    }
+    #btn-jump { bottom: 90px; right: 30px; width: 60px; height: 60px; }
+    #btn-action { bottom: 20px; right: 30px; width: 60px; height: 60px; background: rgba(255, 50, 50, 0.4); }
+    #joystick { bottom: 30px; left: 30px; width: 100px; height: 100px; border-radius: 50%; position: absolute; background: rgba(0,0,0,0.2); border: 2px solid #fff; }
+  </style>
+</head>
+<body>
+
+  <div id="crosshair">+</div>
+
+  <!-- Mobile Controls Overlay -->
+  <div id="btn-jump" class="touch-btn">PULAR</div>
+  <div id="btn-action" class="touch-btn">AÇÃO</div>
+  <div id="joystick"></div>
+
+  <!-- Inventory / Block Select -->
+  <div id="hotbar">
+    <div class="slot active" data-type="1">Grama</div>
+    <div class="slot" data-type="2">Terra</div>
+    <div class="slot" data-type="3">Pedra</div>
+    <div class="slot" data-type="4">Mad.</div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // Configuração do Three.js e Mundo Voxel Retrô
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = new THREE.FogExp2(0x87ceeb, 0.05);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: false }); // Antialias off para efeito retrô
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    // Luz
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight.position.set(20, 40, 20);
+    scene.add(dirLight);
+
+    // Bloco Selecionado
+    let selectedBlockType = 1; // 1: Grama, 2: Terra, 3: Pedra, 4: Madeira
+
+    // Mapeamento de Cores Retrô
+    const blockColors = {
+      1: 0x55aa55, // Grama
+      2: 0x8b5a2b, // Terra
+      3: 0x707070, // Pedra
+      4: 0xa0522d  // Madeira
+    };
+
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    const blocks = new Map();
+
+    function getBlockKey(x, y, z) { return `${x},${y},${z}`; }
+
+    function addBlock(x, y, z, type) {
+      const material = new THREE.MeshLambertMaterial({ color: blockColors[type] });
+      const cube = new THREE.Mesh(geometry, material);
+      cube.position.set(x, y, z);
+      scene.add(cube);
+      blocks.set(getBlockKey(x, y, z), cube);
+    }
+
+    // Geração do Mundo Simples (16x16)
+    for (let x = -8; x < 8; x++) {
+      for (let z = -8; z < 8; z++) {
+        const height = Math.floor(Math.sin(x * 0.3) + Math.cos(z * 0.3)) + 2;
+        for (let y = 0; y <= height; y++) {
+          const type = (y === height) ? 1 : (y > height - 2 ? 2 : 3);
+          addBlock(x, y, z, type);
+        }
+      }
+    }
+
+    // Posicionamento Inicial da Câmera / Jogador
+    camera.position.set(0, 5, 0);
+
+    // Seletor de Blocos na Hotbar
+    document.querySelectorAll('.slot').forEach(slot => {
+      slot.addEventListener('click', (e) => {
+        document.querySelectorAll('.slot').forEach(s => s.classList.remove('active'));
+        e.target.classList.add('active');
+        selectedBlockType = parseInt(e.target.getAttribute('data-type'));
+      });
+    });
+
+    // Interação de Quebrar / Colocar Blocos
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2(0, 0); // Centro da tela
+
+    function interact(isBuilding) {
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(Array.from(blocks.values()));
+
+      if (intersects.length > 0) {
+        const hit = intersects[0];
+        const pos = hit.object.position;
+
+        if (isBuilding) {
+          const normal = hit.face.normal;
+          const newPos = pos.clone().add(normal);
+          addBlock(newPos.x, newPos.y, newPos.z, selectedBlockType);
+        } else {
+          scene.remove(hit.object);
+          blocks.delete(getBlockKey(pos.x, pos.y, pos.z));
+        }
+      }
+    }
+
+    // Listener Touch / Click para Interação
+    document.getElementById('btn-action').addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      interact(false); // Quebrar por padrão no botão de ação
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Loop de Animação
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
+
